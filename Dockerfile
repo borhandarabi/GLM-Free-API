@@ -11,7 +11,7 @@ RUN mkdir -p /app \
     && go build -o /app/token-collector -trimpath -gcflags="all=-l=4" -ldflags="-s -w" ./cmd/token-collector \
     && go build -o /app/zai-api -trimpath -gcflags="all=-l=4" -ldflags="-s -w" .
 
-FROM debian:bookworm-slim AS zai-runtime
+FROM node:20-bookworm-slim AS zai-runtime
 
 ENV PORT="3001" \
     HOST="0.0.0.0" \
@@ -28,12 +28,12 @@ ENV PORT="3001" \
     LOG_FORMAT="text"
 
 # Playwright Go v0.6201.1 bundles Playwright 1.62.1. Install only Chromium
-# and its Debian runtime dependencies; do not keep Node/npm in the final image.
+# and its Debian runtime dependencies. Node/npm are kept because this image is
+# based on the official Node slim image and Playwright's Go driver may use them.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends bash ca-certificates nodejs npm; \
+    apt-get install -y --no-install-recommends bash ca-certificates; \
     npx -y playwright@1.62.1 install --with-deps chromium; \
-    apt-get purge -y --auto-remove nodejs npm; \
     rm -rf /root/.npm /root/.cache/node /var/lib/apt/lists/*
 
 COPY --from=zai-builder /app/token-collector /app/token-collector
