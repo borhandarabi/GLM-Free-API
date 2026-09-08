@@ -17,6 +17,6 @@ export UPSTREAM_MIN_INTERVAL_MS="${UPSTREAM_MIN_INTERVAL_MS:-200}"
 export SESSION_ACQUIRE_TIMEOUT="${SESSION_ACQUIRE_TIMEOUT:-10}"
 export LOG_FORMAT="${LOG_FORMAT:-text}"
 
-./token-collector --tokens 850 --batch 5 --no-tui --block-trackers --parallel 1
+./token-collector --tokens 850 --batch 5 --no-tui --parallel 1
 
 exec ./zai-api
