@@ -137,10 +137,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
+          pattern: zai-api-*
           path: release-assets
           merge-multiple: true
+          if-no-files-found: error
 
       - name: Publish release
         env:
