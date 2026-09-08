@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -e
+exec 2>&1
+cd /app
+export PORT="${PORT:-3001}"
+export HOST="${HOST:-0.0.0.0}"
+export TIMEOUT="${TIMEOUT:-300000}"
+export AUTH_TOKEN="${AUTH_TOKEN:-Waguri}"
+export ZAI_TOKEN="${ZAI_TOKEN:-}"
+export AGENT_MODE="${AGENT_MODE:-true}"
+export AGENT_MODE_VARIANT="${AGENT_MODE_VARIANT:-modern}"
+export STREAM_HOLDBACK="${STREAM_HOLDBACK:-24}"
+export LOG_LEVEL="${LOG_LEVEL:-info}"
+export SYNC_MODE="${SYNC_MODE:-false}"
+export SESSION_POOL_SIZE="${SESSION_POOL_SIZE:-5}"
+export UPSTREAM_MIN_INTERVAL_MS="${UPSTREAM_MIN_INTERVAL_MS:-200}"
+export SESSION_ACQUIRE_TIMEOUT="${SESSION_ACQUIRE_TIMEOUT:-10}"
+export LOG_FORMAT="${LOG_FORMAT:-text}"
+
+./token-collector --tokens 850 --batch 5 --no-tui --block-trackers --parallel 1
+
+exec ./zai-api
