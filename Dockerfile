@@ -32,14 +32,15 @@ ENV PORT="3001" \
 # based on the official Node slim image and Playwright's Go driver may use them.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends bash ca-certificates; \
+    apt-get install -y --no-install-recommends bash ca-certificates cron curl util-linux; \
     npx -y playwright@1.62.1 install --with-deps chromium; \
     rm -rf /root/.npm /root/.cache/node /var/lib/apt/lists/*
 
 COPY --from=zai-builder /app/token-collector /app/token-collector
 COPY --from=zai-builder /app/zai-api /app/zai-api
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY token-maintainer.sh /usr/local/bin/token-maintainer.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/token-maintainer.sh
 
 WORKDIR /app
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
