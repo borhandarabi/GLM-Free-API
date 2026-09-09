@@ -982,6 +982,28 @@ type AgentStreamInterceptor struct {
     callIndex  int
     pendingSep bool // a tool-call block just closed: watch for a stray fence
 
+    // Declared tool names, so an envelope-less invocation can be told from
+    // prose that merely looks like one (see agent_bare.go). Empty disables
+    // that recognition entirely.
+    toolNames []string
+    bareKeep  int // hold-back floor covering the longest name plus its bracket
+
+    // bareFenceOpen tracks, for the bare-call recognizer only, whether the
+    // model's output is currently inside an open ``` markdown fence: a
+    // declared-tool invocation that is merely a documentation example inside
+    // a fence must not be mistaken for a real call (see agent_bare.go).
+    //
+    // This is state about the stream as a whole, not a value re-derived from
+    // whatever is left in the buffer: a fence opened in text already
+    // committed to the client (or consumed as part of an earlier bare call)
+    // is invisible to any scan that only looks at what has not yet been
+    // sent, so it must be threaded forward explicitly. It is updated in
+    // exactly two places — commitContent, for ordinary text, and the
+    // successful branch of drainBareCall, for a recognised call's own span —
+    // and must be carried across rearmAgentInterceptor (see there) or a
+    // mid-stream rewind silently forgets it.
+    bareFenceOpen bool
+
     // ── incremental tool-call streaming state ──
     inCall         bool   // between the opening and closing markers
     tcBlockStart   int    // offset of the opening marker (for leak-as-content)
@@ -1231,6 +1253,16 @@ func (in *AgentStreamInterceptor) drain(final bool) AgentParsedChunk {
 
         rest := in.buffer[in.offset:]
         start, markerLen := findAgentMarker(rest, agentStartWord, final)
+        nativeStart := strings.Index(rest, nativeToolOpen)
+        // A call written with no envelope at all, neither the canonical
+        // markers nor Zhipu's <tool_call> tags, would otherwise reach the
+        // client as assistant text.
+        if handled, done := in.drainBareCall(rest, start, nativeStart, final, &content, &toolCalls); handled {
+            if done {
+                continue
+            }
+            break
+        }
         // Zhipu's native <tool_call> syntax streams as plain text and would
         // otherwise reach the client verbatim.
         if handled, done := in.drainNativeBlock(rest, start, final, &content, &toolCalls); handled {
@@ -1243,7 +1275,7 @@ func (in *AgentStreamInterceptor) drain(final bool) AgentParsedChunk {
             if final {
                 // End of data: everything left is ordinary content.
                 if rest != "" {
-                    content = append(content, rest)
+                    in.commitContent(rest, &content)
                     in.offset = len(in.buffer)
                 }
                 break
@@ -1255,14 +1287,17 @@ func (in *AgentStreamInterceptor) drain(final bool) AgentParsedChunk {
             // backed up to a rune boundary so a multi-byte character is
             // never split across emissions (invalid UTF-8 would render as
             // replacement-char garble on the client — issue #23).
-            const keep = agentStreamKeep
+            keep := agentStreamKeep
+            if in.bareKeep > keep {
+                keep = in.bareKeep
+            }
             if len(rest) > keep {
                 cut := len(rest) - keep
                 for cut > 0 && !utf8.RuneStart(rest[cut]) {
                     cut--
                 }
                 if cut > 0 {
-                    content = append(content, rest[:cut])
+                    in.commitContent(rest[:cut], &content)
                     in.offset += cut
                 }
             }
@@ -1271,7 +1306,7 @@ func (in *AgentStreamInterceptor) drain(final bool) AgentParsedChunk {
         if start > 0 {
             piece := TrimTrailingAgentFence(rest[:start])
             if piece != "" {
-                content = append(content, piece)
+                in.commitContent(piece, &content)
             }
             in.offset += start
         }
@@ -1349,7 +1384,7 @@ func (in *AgentStreamInterceptor) drainToolCall(final bool, content *[]string, t
                 in.callIndex++
             } else {
                 // invalid model block: leave it as visible text
-                *content = append(*content, in.buffer[in.tcBlockStart:end+markerLen])
+                in.commitContent(in.buffer[in.tcBlockStart:end+markerLen], content)
             }
             in.offset = end + markerLen
             in.finishCall()
@@ -1571,19 +1606,22 @@ func agentTransformMessages(rawMessages, toolsRaw json.RawMessage) ([]byte, erro
 }
 
 // agentExtractToolCalls parses tool-call blocks out of finished assistant text
-// using the active shim's parser.
-func agentExtractToolCalls(text string) []map[string]interface{} {
+// using the active shim's parser. toolNames, when given, additionally allows
+// an envelope-less invocation of a declared tool to be recognised.
+func agentExtractToolCalls(text string, toolNames ...string) []map[string]interface{} {
     if config.agentModern() {
-        return ParseAgentToolCalls(text)
+        return ParseAgentToolCalls(TranslateBareToolCalls(text, toolNames))
     }
     return extractAgentToolCalls(text)
 }
 
 // agentStripToolCalls removes tool-call blocks from finished assistant text
-// using the active shim's stripper.
-func agentStripToolCalls(text string) string {
+// using the active shim's stripper. It must be given the same toolNames as
+// agentExtractToolCalls, or a recognised bare call would be reported and then
+// left in the content as well.
+func agentStripToolCalls(text string, toolNames ...string) string {
     if config.agentModern() {
-        return StripAgentToolCalls(text)
+        return StripAgentToolCalls(TranslateBareToolCalls(text, toolNames))
     }
     return stripAgentToolCallBlocks(text)
 }
@@ -1626,11 +1664,25 @@ func (l *legacyAgentInterceptor) finish() (string, []map[string]interface{}) {
 }
 
 // newAgentInterceptor constructs the streaming interceptor for the active shim.
-func newAgentInterceptor() agentInterceptor {
+func newAgentInterceptor(toolNames []string) agentInterceptor {
     if config.agentModern() {
-        return &modernAgentInterceptor{in: &AgentStreamInterceptor{}}
+        in := &AgentStreamInterceptor{}
+        in.setToolNames(toolNames)
+        return &modernAgentInterceptor{in: in}
     }
+    // The legacy shim has its own parser and its own block syntax; bare-call
+    // recognition is a modern-shim concern only.
     return &legacyAgentInterceptor{in: newAgentStreamInterceptor()}
+}
+
+// setToolNames records the request's declared tools and sizes the hold-back
+// window so a tool name split across upstream chunks is never flushed as
+// content before its opening bracket arrives.
+func (in *AgentStreamInterceptor) setToolNames(names []string) {
+    in.toolNames = names
+    if n := agentLongestName(names); n > 0 {
+        in.bareKeep = n + 2
+    }
 }
 
 // rearmAgentInterceptor replaces a stale interceptor (an upstream
@@ -1638,12 +1690,27 @@ func newAgentInterceptor() agentInterceptor {
 // while preserving the client-visible call-index sequence: a call streamed
 // before the rewind keeps its index, and the re-emitted block takes the
 // next one instead of colliding inside SDK accumulation.
+//
+// It also preserves bareFenceOpen. Without this, a rewind landing while the
+// model's output is mid-way through a ``` fence resets the fresh
+// interceptor to "not in a fence", and a bare-call example inside that same
+// fence — the exact false positive the fence check exists to catch — is
+// misread as a real call again, only now intermittently and after the
+// stream has already been rewound once, which is harder to reproduce than
+// the original report.
 func rearmAgentInterceptor(old agentInterceptor) agentInterceptor {
-    fresh := newAgentInterceptor()
+    var names []string
+    var fenceOpen bool
+    if o, ok := old.(*modernAgentInterceptor); ok {
+        names = o.in.toolNames
+        fenceOpen = o.in.bareFenceOpen
+    }
+    fresh := newAgentInterceptor(names)
     switch o := old.(type) {
     case *modernAgentInterceptor:
         if f, ok := fresh.(*modernAgentInterceptor); ok {
             f.in.callIndex = o.in.callIndex
+            f.in.bareFenceOpen = fenceOpen
         }
     case *legacyAgentInterceptor:
         if f, ok := fresh.(*legacyAgentInterceptor); ok {
