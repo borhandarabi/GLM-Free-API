@@ -21,7 +21,9 @@ export TOKEN_MIN_COUNT="${TOKEN_MIN_COUNT:-1000}"
 export TOKEN_REFRESH_AFTER_MINUTES="${TOKEN_REFRESH_AFTER_MINUTES:-30}"
 export TOKEN_COLLECTOR_RETRY_DELAY_SECONDS="${TOKEN_COLLECTOR_RETRY_DELAY_SECONDS:-30}"
 
-/usr/local/bin/token-maintainer.sh --collect
+if [[ ! -f ./tokens.sqlite ]]; then
+    /usr/local/bin/token-maintainer.sh --collect
+fi
 
 cat > /etc/cron.d/token-maintainer <<EOF
 SHELL=/bin/bash
